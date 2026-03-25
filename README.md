@@ -255,25 +255,7 @@ T,seq,mode,base_cmd,lower_deg,middle_deg,upper_deg,gripper_open
 - Add an overhead camera or multi-camera fusion for better depth and pick/place precision.
 - Add optional assisted grasp modes after manual teleop is stable.
 
-## Publishing To GitHub
 
-Before you publish:
-
-1. Make sure [wifi_secrets.h](C:/Users/agnay/Documents/Agnisys/vision_arm/arduino/esp32/vision_arm_esp/include/wifi_secrets.h) is not committed. This repo ignores it via [.gitignore](C:/Users/agnay/Documents/Agnisys/vision_arm/.gitignore).
-2. Keep [wifi_secrets.h.example](C:/Users/agnay/Documents/Agnisys/vision_arm/arduino/esp32/vision_arm_esp/include/wifi_secrets.h.example) in the repo so other people know how to create their own secrets file.
-3. Decide whether you want to keep your local serial port and IP in [config/calibration.json](C:/Users/agnay/Documents/Agnisys/vision_arm/config/calibration.json) or replace them with more generic values before publishing.
-4. Add a license file if you want others to reuse the code. `MIT` is the simplest common choice for hobby projects.
-
-Basic Git commands:
-
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/<your-username>/<your-repo>.git
-git push -u origin main
-```
 
 If you accidentally staged `wifi_secrets.h`, remove it before committing:
 
