@@ -48,9 +48,9 @@ This project is a first working teleoperation stack for a small 5-servo tabletop
 ## Python setup
 
 1. Create and activate a Python environment.
-   Note: python v3.11 and mediapipe version v0.10.14 is required to run this project successfully. 
+2. Note: python v3.11 and mediapipe version v0.10.14 is required to run this project successfully. 
    It is recommended to have these and the dependencies in a virtual enviorment 
-2. Install dependencies:
+3. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
