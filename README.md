@@ -21,6 +21,14 @@ This project is a first working teleoperation stack for a small 5-servo tabletop
 - `arduino/vision_arm_uno.ino` parses packets, clamps values, applies watchdogs, and drives the servos through the PCA9685.
 - `arduino/esp32/vision_arm_esp` is the ESP32 DevKit V1 PlatformIO target using Arduino framework, Wi-Fi UDP, and PCA9685.
 
+## Hardware requirements
+- 4 dof robotic arm with an end effector (gripper) as shown in the following example: https://www.thingiverse.com/thing:2954381/files
+- The arm is based on SG90 and MG90s servos for the pitch joints and end effectors and a continuous rotation SG90 servo for the yaw base of the arm.
+- The project either uses an arduino UNO R1 or an ESP32 devkitv1.
+- The servos are connected to the microcontroller via a 16-channel, I2C, 12-bit PWM/Servo driver module called the PCA 9685
+- The servo drives is either powered by a lithium battery with a step up converter or a bench DC power supply.  
+
+
 ## Important design limits
 
 - The base servo is continuous rotation, so v1 uses open-loop base rate control only. Absolute base angle is not known.
@@ -40,6 +48,8 @@ This project is a first working teleoperation stack for a small 5-servo tabletop
 ## Python setup
 
 1. Create and activate a Python environment.
+   Note: python v3.11 and mediapipe version v0.10.14 is required to run this project successfully. 
+   It is recommended to have these and the dependencies in a virtual enviorment 
 2. Install dependencies:
 
 ```bash
