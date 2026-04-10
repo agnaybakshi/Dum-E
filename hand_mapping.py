@@ -12,37 +12,18 @@ class TeleopSignals:
     x_offset_norm: float
     height_norm: float
     depth_norm: float
-    lower_joint_norm: float
-    middle_joint_norm: float
-    upper_joint_norm: float
     gripper_open: float
     finger_curl_norm: float
-    wrist_tilt_delta: float
-    inside_region: bool
-    region_xy: tuple[float, float]
-
-
-def _inside_region(x: float, y: float, cfg: AppConfig) -> bool:
-    region = cfg.vision.active_region
-    return region.x_min <= x <= region.x_max and region.y_min <= y <= region.y_max
-
-
-def _normalize_region(x: float, y: float, cfg: AppConfig) -> tuple[float, float]:
-    region = cfg.vision.active_region
-    region_x = clamp((x - region.x_min) / region.width, 0.0, 1.0)
-    region_y = clamp((y - region.y_min) / region.height, 0.0, 1.0)
-    return region_x, region_y
 
 
 def extract_signals(observation: HandObservation, cfg: AppConfig) -> TeleopSignals:
     center_x, center_y = observation.center_xy
-    region_x, region_y = _normalize_region(center_x, center_y, cfg)
-    x_offset = (center_x - cfg.vision.neutral_x) / max(cfg.vision.active_region.width * 0.5, 1e-6)
+    x_offset = (center_x - cfg.vision.neutral_x) / max(cfg.mapping.yaw_input_half_span_norm, 1e-6)
     x_offset = clamp(x_offset, -1.0, 1.0)
     if cfg.mapping.yaw_invert:
         x_offset *= -1.0
 
-    height_norm = 1.0 - region_y
+    height_norm = clamp(1.0 - center_y, 0.0, 1.0)
 
     depth_ratio = observation.depth_metric / max(cfg.vision.depth_reference, 1e-6)
     depth_norm = clamp(
@@ -81,33 +62,23 @@ def extract_signals(observation: HandObservation, cfg: AppConfig) -> TeleopSigna
     if cfg.mapping.gripper_invert:
         gripper_open = 1.0 - gripper_open
 
-    wrist_tilt_delta = observation.wrist_tilt_metric - cfg.vision.wrist_tilt_reference
-
-    lower_joint_norm, middle_joint_norm, upper_joint_norm = compute_joint_norms(
-        height_norm,
-        depth_norm,
-        cfg,
-    )
     return TeleopSignals(
         x_offset_norm=x_offset,
         height_norm=height_norm,
         depth_norm=depth_norm,
-        lower_joint_norm=lower_joint_norm,
-        middle_joint_norm=middle_joint_norm,
-        upper_joint_norm=upper_joint_norm,
         gripper_open=gripper_open,
         finger_curl_norm=finger_curl_norm,
-        wrist_tilt_delta=wrist_tilt_delta,
-        inside_region=_inside_region(center_x, center_y, cfg),
-        region_xy=(region_x, region_y),
     )
 
 
-def compute_base_command(x_offset_norm: float, cfg: AppConfig) -> float:
+def compute_base_velocity_deg_per_s(x_offset_norm: float, cfg: AppConfig) -> float:
     value = apply_signed_deadband(x_offset_norm, cfg.mapping.yaw_deadband)
-    magnitude = abs(value) ** cfg.mapping.yaw_exponent
-    command = magnitude * cfg.mapping.yaw_max_command
-    return command if value >= 0.0 else -command
+    magnitude = clamp(abs(value), 0.0, 1.0)
+    curved = magnitude ** cfg.mapping.yaw_exponent
+    normalized = clamp(0.4 * magnitude + 0.6 * curved, 0.0, 1.0)
+    if value < 0.0:
+        normalized *= -1.0
+    return normalized * max(0.0, cfg.mapping.yaw_max_rate_deg_s)
 
 
 def compute_joint_norms(height_norm: float, depth_norm: float, cfg: AppConfig) -> tuple[float, float, float]:

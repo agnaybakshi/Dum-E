@@ -12,7 +12,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="192.168.137.50", help="ESP32 IP or hostname.")
     parser.add_argument("--port", type=int, default=4210, help="ESP32 UDP listen port.")
     parser.add_argument("--mode", choices=("A", "H", "S", "M"), default="A")
-    parser.add_argument("--base", type=float, default=0.0, help="Normalized base command in [-1, 1].")
+    parser.add_argument("--base", "--base-deg", dest="base_deg", type=float, default=90.0, help="Base yaw target in degrees.")
     parser.add_argument("--lower", type=float, default=0.0, help="Lower joint angle in degrees.")
     parser.add_argument("--middle", type=float, default=0.0, help="Middle joint angle in degrees.")
     parser.add_argument("--upper", type=float, default=0.0, help="Upper joint angle in degrees.")
@@ -42,7 +42,7 @@ def main() -> int:
                 sequence += 1
                 command = TeleopCommand(
                     mode=args.mode,
-                    base_command=args.base,
+                    base_deg=args.base_deg,
                     lower_deg=args.lower,
                     middle_deg=args.middle,
                     upper_deg=args.upper,

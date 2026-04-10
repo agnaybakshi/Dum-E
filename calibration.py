@@ -20,7 +20,6 @@ def capture_neutral_reference(config: AppConfig, observation: HandObservation) -
     config.vision.neutral_x = observation.center_xy[0]
     config.vision.neutral_y = observation.center_xy[1]
     config.vision.depth_reference = observation.depth_metric
-    config.vision.wrist_tilt_reference = observation.wrist_tilt_metric
 
 
 def capture_pinch_reference(config: AppConfig, observation: HandObservation, open_reference: bool) -> None:
@@ -37,18 +36,21 @@ def capture_grip_reference(config: AppConfig, observation: HandObservation, open
         config.vision.grip_closed_reference = observation.finger_curl_metric
 
 
-def export_firmware_header(config: AppConfig, output_path: str | Path) -> None:
+def export_firmware_header(config: AppConfig, output_path: str | Path) -> Path:
     firmware = config.firmware
+    base_min_deg = min(firmware.base_min_deg, firmware.base_max_deg)
+    base_max_deg = max(firmware.base_min_deg, firmware.base_max_deg)
+    base_center_deg = max(base_min_deg, min(firmware.base_center_deg, base_max_deg))
+    base_home_deg = max(base_min_deg, min(firmware.base_home_deg, base_max_deg))
     lines = [
         "#pragma once",
         "",
         "// Auto-generated from config/calibration.json by calibration.py",
         "",
-        f"constexpr int BASE_STOP_DEG = {firmware.base_stop_deg};",
-        f"constexpr int BASE_SPEED_RANGE_DEG = {firmware.base_speed_range_deg};",
-        f"constexpr int BASE_DIRECTION_SIGN = {firmware.base_direction_sign};",
-        f"constexpr float BASE_INPUT_DEADBAND = {firmware.base_input_deadband:.4f}f;",
-        f"constexpr float BASE_HOLD_TRIM_COMMAND = {config.mapping.base_trim_command:.4f}f;",
+        f"constexpr int BASE_CENTER_DEG = {base_center_deg};",
+        f"constexpr int BASE_HOME_DEG = {base_home_deg};",
+        f"constexpr int BASE_MIN_DEG = {base_min_deg};",
+        f"constexpr int BASE_MAX_DEG = {base_max_deg};",
         "",
         "constexpr int LOWER_GEAR_RATIO = 4;",
         f"constexpr int LOWER_SERVO_ZERO_DEG = {firmware.lower_zero_deg};",
@@ -74,17 +76,20 @@ def export_firmware_header(config: AppConfig, output_path: str | Path) -> None:
         "",
         f"constexpr unsigned long WATCHDOG_TIMEOUT_MS = {firmware.watchdog_timeout_ms}UL;",
         f"constexpr float SERVO_SLEW_DEG_PER_S = {firmware.servo_slew_deg_s:.4f}f;",
-        f"constexpr float BASE_SLEW_UNITS_PER_S = {firmware.base_slew_units_per_s:.4f}f;",
+        f"constexpr float BASE_SLEW_DEG_PER_S = {firmware.base_slew_deg_s:.4f}f;",
         "",
     ]
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(lines), encoding="ascii")
+    return target
 
 
-def export_firmware_headers(config: AppConfig, output_paths: tuple[Path, ...] = DEFAULT_FIRMWARE_HEADER_OUTPUTS) -> None:
+def export_firmware_headers(config: AppConfig, output_paths: tuple[Path, ...] = DEFAULT_FIRMWARE_HEADER_OUTPUTS) -> tuple[Path, ...]:
+    written_paths: list[Path] = []
     for output_path in output_paths:
-        export_firmware_header(config, output_path)
+        written_paths.append(export_firmware_header(config, output_path))
+    return tuple(written_paths)
 
 
 def export_arduino_header(config: AppConfig, output_path: str | Path) -> None:
@@ -111,14 +116,15 @@ def _parse_args() -> argparse.Namespace:
     grip.add_argument("--open", dest="grip_open", type=float)
     grip.add_argument("--closed", dest="grip_closed", type=float)
 
-    base_stop = subparsers.add_parser("set-base-stop", help="Set continuous-servo neutral stop degree.")
-    base_stop.add_argument("--deg", type=int, required=True)
+    base_center = subparsers.add_parser("set-base-center", help="Set positional base center angle.")
+    base_center.add_argument("--deg", type=int, required=True)
 
-    region = subparsers.add_parser("set-region", help="Set teleop active region.")
-    region.add_argument("--x-min", type=float, required=True)
-    region.add_argument("--y-min", type=float, required=True)
-    region.add_argument("--x-max", type=float, required=True)
-    region.add_argument("--y-max", type=float, required=True)
+    base_home = subparsers.add_parser("set-base-home", help="Set positional base home angle.")
+    base_home.add_argument("--deg", type=int, required=True)
+
+    base_range = subparsers.add_parser("set-base-range", help="Set positional base joint limits.")
+    base_range.add_argument("--min-deg", type=int, required=True)
+    base_range.add_argument("--max-deg", type=int, required=True)
 
     export = subparsers.add_parser("export-arduino", help="Generate the firmware calibration header.")
     export.add_argument(
@@ -162,25 +168,44 @@ def main() -> None:
         save_config(config)
         return
 
-    if args.command == "set-base-stop":
-        config.firmware.base_stop_deg = args.deg
+    if args.command == "set-base-center":
+        config.firmware.base_center_deg = max(
+            config.firmware.base_min_deg,
+            min(args.deg, config.firmware.base_max_deg),
+        )
         save_config(config)
         return
 
-    if args.command == "set-region":
-        config.vision.active_region.x_min = args.x_min
-        config.vision.active_region.y_min = args.y_min
-        config.vision.active_region.x_max = args.x_max
-        config.vision.active_region.y_max = args.y_max
+    if args.command == "set-base-home":
+        config.firmware.base_home_deg = max(
+            config.firmware.base_min_deg,
+            min(args.deg, config.firmware.base_max_deg),
+        )
+        save_config(config)
+        return
+
+    if args.command == "set-base-range":
+        config.firmware.base_min_deg = min(args.min_deg, args.max_deg)
+        config.firmware.base_max_deg = max(args.min_deg, args.max_deg)
+        config.firmware.base_center_deg = max(
+            config.firmware.base_min_deg,
+            min(config.firmware.base_center_deg, config.firmware.base_max_deg),
+        )
+        config.firmware.base_home_deg = max(
+            config.firmware.base_min_deg,
+            min(config.firmware.base_home_deg, config.firmware.base_max_deg),
+        )
         save_config(config)
         return
 
     if args.command == "export-arduino":
-        export_firmware_header(config, args.output)
+        written_path = export_firmware_header(config, args.output)
+        print(written_path.resolve())
         return
 
     if args.command == "export-firmware":
-        export_firmware_headers(config)
+        for written_path in export_firmware_headers(config):
+            print(written_path.resolve())
         return
 
 

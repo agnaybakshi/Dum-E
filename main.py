@@ -8,14 +8,12 @@ from dataclasses import dataclass
 import cv2
 
 from calibration import (
-    capture_grip_reference,
     capture_neutral_reference,
-    capture_pinch_reference,
     export_firmware_headers,
 )
 from config import AppConfig, load_config, save_config
 from filters import LowPassFilter, SlewRateLimiter, clamp
-from hand_mapping import compute_base_command, compute_joint_norms, extract_signals
+from hand_mapping import compute_base_velocity_deg_per_s, compute_joint_norms, extract_signals
 from transport import TeleopCommand, build_transport
 from ui_overlay import draw_overlay
 from vision import HandTracker
@@ -62,6 +60,8 @@ def _build_filters(config: AppConfig) -> dict[str, object]:
         "height": LowPassFilter(config.filters.y_alpha),
         "depth": LowPassFilter(config.filters.depth_alpha),
         "grip": LowPassFilter(config.filters.grip_alpha),
+        "yaw_rate": LowPassFilter(config.filters.yaw_rate_alpha, 0.0),
+        "base": SlewRateLimiter(config.firmware.base_slew_deg_s, float(config.firmware.base_home_deg)),
         "lower": SlewRateLimiter(config.filters.joint_rate_deg_s, 0.0),
         "middle": SlewRateLimiter(config.filters.joint_rate_deg_s, 0.0),
         "upper": SlewRateLimiter(config.filters.joint_rate_deg_s, 0.0),
@@ -70,13 +70,6 @@ def _build_filters(config: AppConfig) -> dict[str, object]:
             config.firmware.startup_gripper_open_fraction,
         ),
     }
-
-
-def _reload_config(path: str) -> AppConfig:
-    config = load_config(path)
-    export_firmware_headers(config)
-    return config
-
 
 def _home_joints() -> JointState:
     return JointState()
@@ -123,9 +116,14 @@ def main() -> int:
     tracking_ok = False
     last_valid_time = 0.0
     home_until = 0.0
+    startup_pose_until = 0.0
+    wave_started_at = 0.0
+    wave_until = 0.0
     transport_status = "disabled" if not config.transport.enabled else "disconnected"
 
-    current_base_command = 0.0
+    current_base_target_deg = float(config.firmware.base_home_deg)
+    current_base_deg = current_base_target_deg
+    current_yaw_rate_deg_s = 0.0
     current_gripper_open = config.firmware.startup_gripper_open_fraction
     current_gripper_target_open = config.firmware.startup_gripper_open_fraction
     current_lower_target_deg = 0.0
@@ -150,6 +148,14 @@ def main() -> int:
 
         if config.control.send_home_on_start:
             home_until = time.perf_counter() + 1.0
+            startup_pose_until = home_until + max(0.0, config.control.startup_pose_hold_s)
+            if config.control.startup_wave_cycles > 0:
+                wave_started_at = startup_pose_until
+                wave_until = wave_started_at + (
+                    2.0
+                    * config.control.startup_wave_half_period_s
+                    * config.control.startup_wave_cycles
+                )
 
         previous_time = time.perf_counter()
 
@@ -167,7 +173,6 @@ def main() -> int:
 
             current_hand = tracker.process(frame)
             tracking_ok = current_hand is not None
-            base_command = 0.0
 
             if tracking_ok:
                 signals = extract_signals(current_hand, config)
@@ -205,7 +210,7 @@ def main() -> int:
                     depth_norm = held_depth_norm
 
                 grip_norm = filters["grip"].update(raw_grip_norm)
-                hand_active = signals.inside_region
+                hand_active = True
             else:
                 x_norm = filters["x"].value if filters["x"].value is not None else 0.0
                 height_norm = filters["height"].value if filters["height"].value is not None else 0.5
@@ -214,31 +219,101 @@ def main() -> int:
                 hand_active = False
                 depth_hold_active = False
                 depth_hold_started_at = 0.0
+                current_yaw_rate_deg_s = 0.0
+                filters["yaw_rate"].reset(0.0)
 
             mode = "H"
             if estop:
                 status = "estop hold"
                 mode = "S"
-                base_command = config.mapping.base_trim_command
+                current_base_target_deg = current_base_deg
+                current_yaw_rate_deg_s = 0.0
+                filters["yaw_rate"].reset(0.0)
             elif now < home_until:
                 status = "homing"
                 mode = "M"
-                base_command = config.mapping.base_trim_command
+                current_base_target_deg = float(config.firmware.base_home_deg)
+                current_yaw_rate_deg_s = 0.0
+                filters["yaw_rate"].reset(0.0)
                 current_lower_target_deg = 0.0
                 current_middle_target_deg = 0.0
                 current_upper_target_deg = 0.0
                 current_joints = _home_joints()
                 current_gripper_open = config.firmware.startup_gripper_open_fraction
+                current_gripper_target_open = current_gripper_open
+            elif now < startup_pose_until:
+                status = "startup pose"
+                mode = "A"
+                current_base_target_deg = float(config.firmware.base_home_deg)
+                current_yaw_rate_deg_s = 0.0
+                filters["yaw_rate"].reset(0.0)
+                current_lower_target_deg = clamp(
+                    config.control.startup_wave_lower_deg,
+                    0.0,
+                    config.kinematics.q1_max_deg,
+                )
+                current_middle_target_deg = clamp(
+                    config.control.startup_wave_middle_deg,
+                    0.0,
+                    config.kinematics.q2_max_deg,
+                )
+                current_upper_target_deg = 0.0
+                current_joints = JointState(
+                    lower_deg=filters["lower"].update(current_lower_target_deg, dt),
+                    middle_deg=filters["middle"].update(current_middle_target_deg, dt),
+                    upper_deg=filters["upper"].update(current_upper_target_deg, dt),
+                )
+                current_gripper_target_open = config.firmware.startup_gripper_open_fraction
+                current_gripper_open = filters["gripper"].update(current_gripper_target_open, dt)
+            elif now < wave_until:
+                status = "startup hello"
+                mode = "A"
+                current_base_target_deg = float(config.firmware.base_home_deg)
+                current_yaw_rate_deg_s = 0.0
+                filters["yaw_rate"].reset(0.0)
+                current_lower_target_deg = clamp(
+                    config.control.startup_wave_lower_deg,
+                    0.0,
+                    config.kinematics.q1_max_deg,
+                )
+                current_middle_target_deg = clamp(
+                    config.control.startup_wave_middle_deg,
+                    0.0,
+                    config.kinematics.q2_max_deg,
+                )
+                wave_half_period_s = max(0.05, config.control.startup_wave_half_period_s)
+                wave_phase = (now - wave_started_at) / wave_half_period_s
+                wave_cycle = wave_phase % 2.0
+                wave_fraction = wave_cycle if wave_cycle <= 1.0 else 2.0 - wave_cycle
+                current_upper_target_deg = clamp(
+                    wave_fraction * config.control.startup_wave_upper_deg,
+                    0.0,
+                    config.kinematics.q3_max_deg,
+                )
+                current_joints = JointState(
+                    lower_deg=filters["lower"].update(current_lower_target_deg, dt),
+                    middle_deg=filters["middle"].update(current_middle_target_deg, dt),
+                    upper_deg=filters["upper"].update(current_upper_target_deg, dt),
+                )
+                current_gripper_target_open = clamp(1.0 - wave_fraction, 0.0, 1.0)
+                current_gripper_open = filters["gripper"].update(current_gripper_target_open, dt)
             elif frozen:
                 status = "frozen"
                 mode = "H"
-                base_command = config.mapping.base_trim_command
+                current_base_target_deg = current_base_deg
+                current_yaw_rate_deg_s = 0.0
+                filters["yaw_rate"].reset(0.0)
             elif tracking_ok and hand_active:
                 last_valid_time = now
-                base_command = clamp(
-                    compute_base_command(x_norm, config) + config.mapping.base_trim_command,
-                    -1.0,
-                    1.0,
+                raw_yaw_rate_deg_s = compute_base_velocity_deg_per_s(x_norm, config)
+                current_yaw_rate_deg_s = filters["yaw_rate"].update(raw_yaw_rate_deg_s)
+                if abs(current_yaw_rate_deg_s) < config.filters.yaw_stop_rate_deg_s:
+                    current_yaw_rate_deg_s = 0.0
+                    filters["yaw_rate"].reset(0.0)
+                current_base_target_deg = clamp(
+                    current_base_target_deg + current_yaw_rate_deg_s * dt,
+                    float(config.firmware.base_min_deg),
+                    float(config.firmware.base_max_deg),
                 )
                 lower_joint_norm, middle_joint_norm, upper_joint_norm = compute_joint_norms(
                     height_norm,
@@ -267,17 +342,22 @@ def main() -> int:
             elif (now - last_valid_time) <= config.workspace.lost_hold_timeout_s:
                 status = "brief tracking loss hold"
                 mode = "H"
-                base_command = config.mapping.base_trim_command
+                current_base_target_deg = current_base_deg
+                current_yaw_rate_deg_s = 0.0
+                filters["yaw_rate"].reset(0.0)
             else:
-                status = "waiting for active hand"
+                status = "waiting for tracked hand"
                 mode = "H"
-                base_command = config.mapping.base_trim_command
                 current_gripper_target_open = current_gripper_open
+                current_base_target_deg = current_base_deg
+                current_yaw_rate_deg_s = 0.0
+                filters["yaw_rate"].reset(0.0)
 
-            current_base_command = base_command
+            teleop_live = tracking_ok and mode == "A" and now >= wave_until
+            current_base_deg = filters["base"].update(current_base_target_deg, dt)
             command = TeleopCommand(
                 mode=mode,
-                base_command=current_base_command,
+                base_deg=current_base_deg,
                 lower_deg=current_joints.lower_deg,
                 middle_deg=current_joints.middle_deg,
                 upper_deg=current_joints.upper_deg,
@@ -307,11 +387,11 @@ def main() -> int:
                 {
                     "status": status,
                     "tracking_ok": tracking_ok,
-                    "hand_active": hand_active,
+                    "hand_active": teleop_live,
                     "frozen": frozen,
                     "estop": estop,
-                    "base_command": current_base_command,
-                    "base_trim_command": config.mapping.base_trim_command,
+                    "yaw_max_rate_deg_s": config.mapping.yaw_max_rate_deg_s,
+                    "base_target_deg": current_base_target_deg,
                     "lower_target_deg": current_lower_target_deg,
                     "middle_target_deg": current_middle_target_deg,
                     "upper_target_deg": current_upper_target_deg,
@@ -327,7 +407,6 @@ def main() -> int:
                     "depth_norm": depth_norm,
                     "grip_norm": grip_norm,
                     "finger_curl_norm": signals.finger_curl_norm if tracking_ok else 0.0,
-                    "wrist_tilt_delta": signals.wrist_tilt_delta if tracking_ok else 0.0,
                 },
             )
             cv2.imshow("Vision Arm Teleop", overlay)
@@ -343,7 +422,7 @@ def main() -> int:
                     transport_controller.send(
                         TeleopCommand(
                             "S",
-                            config.mapping.base_trim_command,
+                            current_base_deg,
                             current_joints.lower_deg,
                             current_joints.middle_deg,
                             current_joints.upper_deg,
@@ -354,37 +433,24 @@ def main() -> int:
             elif key == ord("h"):
                 frozen = True
                 home_until = now + 1.0
-            elif key == ord("r"):
-                config = _reload_config(args.config)
-                _apply_runtime_overrides(config, args)
-                filters = _build_filters(config)
-                transport_controller.close()
-                transport_controller = build_transport(config)
-                transport_controller.connect()
-                tracker.close()
-                tracker = HandTracker(config.vision)
             elif key == ord("["):
-                config.mapping.base_trim_command = clamp(
-                    config.mapping.base_trim_command - 0.005, -0.25, 0.25
+                config.mapping.yaw_max_rate_deg_s = clamp(
+                    config.mapping.yaw_max_rate_deg_s - 5.0,
+                    5.0,
+                    180.0,
                 )
                 save_config(config)
             elif key == ord("]"):
-                config.mapping.base_trim_command = clamp(
-                    config.mapping.base_trim_command + 0.005, -0.25, 0.25
+                config.mapping.yaw_max_rate_deg_s = clamp(
+                    config.mapping.yaw_max_rate_deg_s + 5.0,
+                    5.0,
+                    180.0,
                 )
                 save_config(config)
             elif key == ord("n") and current_hand is not None:
                 capture_neutral_reference(config, current_hand)
                 save_config(config)
                 export_firmware_headers(config)
-            elif key == ord("o") and current_hand is not None:
-                capture_pinch_reference(config, current_hand, open_reference=True)
-                capture_grip_reference(config, current_hand, open_reference=True)
-                save_config(config)
-            elif key == ord("p") and current_hand is not None:
-                capture_pinch_reference(config, current_hand, open_reference=False)
-                capture_grip_reference(config, current_hand, open_reference=False)
-                save_config(config)
 
     except KeyboardInterrupt:
         pass
@@ -396,7 +462,7 @@ def main() -> int:
             transport_controller.send(
                 TeleopCommand(
                     mode="S",
-                    base_command=config.mapping.base_trim_command,
+                    base_deg=current_base_deg,
                     lower_deg=current_joints.lower_deg,
                     middle_deg=current_joints.middle_deg,
                     upper_deg=current_joints.upper_deg,

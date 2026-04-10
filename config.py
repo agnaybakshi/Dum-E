@@ -10,22 +10,6 @@ T = TypeVar("T")
 
 
 @dataclass
-class RegionConfig:
-    x_min: float = 0.08
-    y_min: float = 0.08
-    x_max: float = 0.92
-    y_max: float = 0.92
-
-    @property
-    def width(self) -> float:
-        return max(1e-6, self.x_max - self.x_min)
-
-    @property
-    def height(self) -> float:
-        return max(1e-6, self.y_max - self.y_min)
-
-
-@dataclass
 class CameraConfig:
     device_index: int = 0
     frame_width: int = 1280
@@ -40,11 +24,9 @@ class VisionConfig:
     min_detection_confidence: float = 0.45
     min_tracking_confidence: float = 0.35
     handedness: str = "either"
-    active_region: RegionConfig = field(default_factory=RegionConfig)
     neutral_x: float = 0.5
     neutral_y: float = 0.55
     depth_reference: float = 0.18
-    wrist_tilt_reference: float = 0.0
     grip_open_reference: float = 0.2
     grip_closed_reference: float = 0.75
     pinch_open_reference: float = 0.95
@@ -55,11 +37,11 @@ class VisionConfig:
 @dataclass
 class MappingConfig:
     control_mode: str = "direct_joint"
-    yaw_deadband: float = 0.12
-    yaw_exponent: float = 1.5
-    yaw_max_command: float = 1.0
+    yaw_deadband: float = 0.2
+    yaw_exponent: float = 2.6
+    yaw_input_half_span_norm: float = 0.32
+    yaw_max_rate_deg_s: float = 55.0
     yaw_invert: bool = False
-    base_trim_command: float = 0.0
     depth_to_reach_sign: float = 1.0
     depth_gain: float = 1.3
     lower_depth_invert: bool = True
@@ -88,10 +70,12 @@ class WorkspaceConfig:
 
 @dataclass
 class FilterConfig:
-    x_alpha: float = 0.45
+    x_alpha: float = 0.16
     y_alpha: float = 0.35
     depth_alpha: float = 0.24
     grip_alpha: float = 0.34
+    yaw_rate_alpha: float = 0.2
+    yaw_stop_rate_deg_s: float = 0.35
     reach_rate_mm_s: float = 130.0
     height_rate_mm_s: float = 160.0
     joint_rate_deg_s: float = 70.0
@@ -157,14 +141,20 @@ class ControlConfig:
     freeze_on_start: bool = True
     send_home_on_start: bool = False
     overlay_scale: float = 1.0
+    startup_pose_hold_s: float = 0.7
+    startup_wave_cycles: int = 3
+    startup_wave_half_period_s: float = 0.28
+    startup_wave_lower_deg: float = 35.0
+    startup_wave_middle_deg: float = 45.0
+    startup_wave_upper_deg: float = 35.0
 
 
 @dataclass
 class FirmwareCalibrationConfig:
-    base_stop_deg: int = 90
-    base_speed_range_deg: int = 28
-    base_direction_sign: int = 1
-    base_input_deadband: float = 0.05
+    base_center_deg: int = 90
+    base_home_deg: int = 90
+    base_min_deg: int = 0
+    base_max_deg: int = 180
     lower_zero_deg: int = 0
     lower_sign: int = 1
     lower_servo_min_deg: int = 0
@@ -179,10 +169,10 @@ class FirmwareCalibrationConfig:
     upper_servo_max_deg: int = 180
     gripper_open_servo_deg: int = 180
     gripper_closed_servo_deg: int = 0
-    startup_gripper_open_fraction: float = 0.5
+    startup_gripper_open_fraction: float = 1.0
     watchdog_timeout_ms: int = 250
     servo_slew_deg_s: float = 90.0
-    base_slew_units_per_s: float = 2.5
+    base_slew_deg_s: float = 45.0
 
 
 @dataclass

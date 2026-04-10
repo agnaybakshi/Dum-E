@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
+
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from config import AppConfig
 from vision import HandObservation
@@ -17,11 +21,94 @@ HAND_CONNECTIONS = (
 )
 
 
-def _draw_bar(frame: np.ndarray, label: str, value: float, x: int, y: int, width: int) -> None:
-    cv2.putText(frame, label, (x, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
-    cv2.rectangle(frame, (x, y), (x + width, y + 10), (70, 70, 70), 1)
+CONSOLAS_REGULAR_PATH = Path("C:/Windows/Fonts/consola.ttf")
+CONSOLAS_BOLD_PATH = Path("C:/Windows/Fonts/consolab.ttf")
+
+
+@lru_cache(maxsize=8)
+def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    font_path = CONSOLAS_BOLD_PATH if bold else CONSOLAS_REGULAR_PATH
+    try:
+        return ImageFont.truetype(str(font_path), size=size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def _draw_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    origin: tuple[int, int],
+    *,
+    color: tuple[int, int, int],
+    size: int,
+    bold: bool = False,
+) -> None:
+    draw.text(
+        origin,
+        text,
+        font=_load_font(size, bold),
+        fill=color,
+        stroke_width=2,
+        stroke_fill=(16, 18, 24),
+    )
+
+
+def _composite_rgba(frame: np.ndarray, overlay_rgba: np.ndarray, x: int, y: int) -> None:
+    overlay_h, overlay_w = overlay_rgba.shape[:2]
+    frame_h, frame_w = frame.shape[:2]
+    if overlay_h <= 0 or overlay_w <= 0 or x >= frame_w or y >= frame_h:
+        return
+
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(frame_w, x + overlay_w)
+    y1 = min(frame_h, y + overlay_h)
+    if x1 <= x0 or y1 <= y0:
+        return
+
+    overlay_slice = overlay_rgba[(y0 - y):(y1 - y), (x0 - x):(x1 - x)]
+    alpha = overlay_slice[:, :, 3:4].astype(np.float32) / 255.0
+    if not np.any(alpha):
+        return
+
+    overlay_bgr = overlay_slice[:, :, :3][:, :, ::-1].astype(np.float32)
+    frame_roi = frame[y0:y1, x0:x1].astype(np.float32)
+    blended = overlay_bgr * alpha + frame_roi * (1.0 - alpha)
+    frame[y0:y1, x0:x1] = blended.astype(np.uint8)
+
+
+def _render_text_overlay(
+    size: tuple[int, int],
+    title: str,
+    lines: list[str],
+) -> np.ndarray:
+    width, height = size
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+
+    _draw_text(draw, title, (0, 0), color=(121, 220, 205), size=18, bold=True)
+
+    y = 26
+    for line in lines:
+        _draw_text(draw, line, (0, y), color=(232, 236, 244), size=14)
+        y += 17
+
+    return np.array(image, dtype=np.uint8)
+
+
+def _render_bar_labels(width: int, labels: list[tuple[str, int]]) -> np.ndarray:
+    image = Image.new("RGBA", (width, 24), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    for text, x in labels:
+        _draw_text(draw, text, (x, 0), color=(230, 235, 242), size=13, bold=True)
+    return np.array(image, dtype=np.uint8)
+
+
+def _draw_bar(frame: np.ndarray, value: float, x: int, y: int, width: int) -> None:
+    cv2.rectangle(frame, (x, y), (x + width, y + 12), (92, 102, 122), 1, cv2.LINE_AA)
     fill = int(max(0.0, min(1.0, value)) * width)
-    cv2.rectangle(frame, (x, y), (x + fill, y + 10), (40, 200, 120), -1)
+    cv2.rectangle(frame, (x, y), (x + fill, y + 12), (64, 202, 174), -1, cv2.LINE_AA)
+    cv2.circle(frame, (x + fill, y + 6), 5, (240, 250, 255), -1, cv2.LINE_AA)
 
 
 def draw_overlay(
@@ -32,14 +119,6 @@ def draw_overlay(
 ) -> np.ndarray:
     display = frame.copy()
     height, width = display.shape[:2]
-    region = config.vision.active_region
-
-    x0 = int(region.x_min * width)
-    y0 = int(region.y_min * height)
-    x1 = int(region.x_max * width)
-    y1 = int(region.y_max * height)
-    region_color = (0, 210, 120) if runtime.get("hand_active", False) else (110, 110, 110)
-    cv2.rectangle(display, (x0, y0), (x1, y1), region_color, 2)
 
     neutral_px = (int(config.vision.neutral_x * width), int(config.vision.neutral_y * height))
     cv2.drawMarker(display, neutral_px, (255, 180, 0), cv2.MARKER_CROSS, 18, 2)
@@ -57,35 +136,41 @@ def draw_overlay(
         f"Teleop: {'active' if runtime.get('hand_active', False) else 'hold'}",
         f"Freeze: {'on' if runtime.get('frozen', False) else 'off'}",
         f"E-stop: {'on' if runtime.get('estop', False) else 'off'}",
-        f"Base cmd: {runtime.get('base_command', 0.0): .2f}",
-        f"Base neutral trim: {runtime.get('base_trim_command', 0.0): .2f}",
+        f"Yaw rate deg/s: {runtime.get('yaw_max_rate_deg_s', 0.0): .1f}",
         (
-            "Joint targets deg: "
+            "Pitch targets deg: "
             f"{runtime.get('lower_target_deg', 0.0):.1f}, "
             f"{runtime.get('middle_target_deg', 0.0):.1f}, "
             f"{runtime.get('upper_target_deg', 0.0):.1f}"
         ),
-        (
-            "Joints deg: "
-            f"{runtime.get('lower_deg', 0.0):.1f}, "
-            f"{runtime.get('middle_deg', 0.0):.1f}, "
-            f"{runtime.get('upper_deg', 0.0):.1f}"
-        ),
+        f"Base target deg: {runtime.get('base_target_deg', 0.0): .1f}",
         f"Gripper open: {runtime.get('gripper_open', 0.0):.2f}",
         f"Finger curl: {runtime.get('finger_curl_norm', 0.0):.2f}",
-        f"Wrist tilt: {runtime.get('wrist_tilt_delta', 0.0): .2f}",
         f"Depth hold: {'on' if runtime.get('depth_hold_active', False) else 'off'}",
         f"Transport: {runtime.get('transport_status', 'unknown')}",
-        "Keys: q quit | f freeze | x e-stop | h home | n neutral | o open hand | p closed hand | r reload | [ ] base trim",
+        "Keys: q quit | f freeze | x e-stop | h home | n neutral | [ ] yaw rate",
     ]
 
-    y = 26
-    for line in lines:
-        cv2.putText(display, line, (14, y), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (240, 240, 240), 1, cv2.LINE_AA)
-        y += 22
+    hud_width = min(width - 28, 520)
+    hud_height = 26 + len(lines) * 17
+    hud_overlay = _render_text_overlay((hud_width, hud_height), "hand teleop", lines)
+    _composite_rgba(display, hud_overlay, 24, 24)
 
-    _draw_bar(display, "X", float(runtime.get("x_norm", 0.5)), 14, height - 70, 180)
-    _draw_bar(display, "Height", float(runtime.get("height_norm", 0.5)), 214, height - 70, 180)
-    _draw_bar(display, "Depth", float(runtime.get("depth_norm", 0.5)), 414, height - 70, 180)
-    _draw_bar(display, "Grip", float(runtime.get("grip_norm", 0.0)), 614, height - 70, 180)
+    bar_y = height - 58
+    bar_width = 220
+    bar_specs = [
+        ("X", 28, float(runtime.get("x_norm", 0.5))),
+        ("Height", 286, float(runtime.get("height_norm", 0.5))),
+        ("Depth", 544, float(runtime.get("depth_norm", 0.5))),
+        ("Grip", 802, float(runtime.get("grip_norm", 0.0))),
+    ]
+    label_overlay = _render_bar_labels(
+        width,
+        [(label, x) for label, x, _value in bar_specs],
+    )
+    _composite_rgba(display, label_overlay, 0, bar_y - 24)
+
+    for _label, x, value in bar_specs:
+        _draw_bar(display, value, x, bar_y, bar_width)
+
     return display

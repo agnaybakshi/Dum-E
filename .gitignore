@@ -7,6 +7,7 @@ env/
 
 .vscode/
 .idea/
+*.code-workspace
 
 .pytest_cache/
 .mypy_cache/
@@ -14,6 +15,7 @@ env/
 arduino/esp32/vision_arm_esp/.pio/
 arduino/esp32/vision_arm_esp/.pioenvs/
 arduino/esp32/vision_arm_esp/.piolibdeps/
+presentation_deck/node_modules/
 
 arduino/esp32/vision_arm_esp/include/wifi_secrets.h
 

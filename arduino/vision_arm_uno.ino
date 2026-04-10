@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include "generated_calibration.h"
@@ -14,6 +15,7 @@ constexpr uint8_t PCA9685_DEVICE_ADDRESS = 0x40;
 constexpr float PCA9685_SERVO_FREQ_HZ = 50.0f;
 constexpr float SERVO_MIN_PULSE_US = 500.0f;
 constexpr float SERVO_MAX_PULSE_US = 2500.0f;
+constexpr float BASE_WRITE_EPSILON_DEG = 0.5f;
 
 constexpr float LOWER_JOINT_MIN_DEG = 0.0f;
 constexpr float LOWER_JOINT_MAX_DEG = 45.0f;
@@ -27,7 +29,7 @@ Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(PCA9685_DEVICE_ADDRESS);
 
 struct CommandTarget {
   char mode = 'H';
-  float baseInput = 0.0f;
+  float baseDeg = BASE_HOME_DEG;
   float lowerJointDeg = 0.0f;
   float middleJointDeg = 0.0f;
   float upperJointDeg = 0.0f;
@@ -36,11 +38,12 @@ struct CommandTarget {
 };
 
 CommandTarget target;
-float currentBaseInput = 0.0f;
+float currentBaseDeg = BASE_HOME_DEG;
 float currentLowerServoDeg = LOWER_SERVO_ZERO_DEG;
 float currentMiddleServoDeg = MIDDLE_SERVO_ZERO_DEG;
 float currentUpperServoDeg = UPPER_SERVO_ZERO_DEG;
 float currentGripperServoDeg = GRIPPER_CLOSED_SERVO_DEG + STARTUP_GRIPPER_OPEN_FRACTION * (GRIPPER_OPEN_SERVO_DEG - GRIPPER_CLOSED_SERVO_DEG);
+float lastWrittenBaseServoDeg = BASE_HOME_DEG;
 
 char rxBuffer[RX_BUFFER_SIZE];
 size_t rxLength = 0;
@@ -55,15 +58,6 @@ float clampf(float value, float lower, float upper) {
     return upper;
   }
   return value;
-}
-
-float applyInputDeadband(float value) {
-  float magnitude = fabs(value);
-  if (magnitude <= BASE_INPUT_DEADBAND) {
-    return 0.0f;
-  }
-  float scaled = (magnitude - BASE_INPUT_DEADBAND) / max(0.0001f, 1.0f - BASE_INPUT_DEADBAND);
-  return value >= 0.0f ? scaled : -scaled;
 }
 
 float slewToward(float current, float targetValue, float maxDelta) {
@@ -99,16 +93,8 @@ float gripperOpenToServo(float openFraction) {
   return clampf(servoDeg, lower, upper);
 }
 
-float baseInputToServo(float input) {
-  float inputClamped = clampf(input, -1.0f, 1.0f);
-  // Let small trim commands around zero pass through so we can cancel
-  // continuous-servo drift without needing a large manual deadband break.
-  float shaped = inputClamped;
-  if (fabs(inputClamped) > BASE_INPUT_DEADBAND) {
-    shaped = applyInputDeadband(inputClamped);
-  }
-  float servoDeg = BASE_STOP_DEG + BASE_DIRECTION_SIGN * shaped * BASE_SPEED_RANGE_DEG;
-  return clampf(servoDeg, 0.0f, 180.0f);
+float baseJointToServo(float baseDeg) {
+  return clampf(baseDeg, BASE_MIN_DEG, BASE_MAX_DEG);
 }
 
 uint16_t servoDegToTicks(float servoDeg) {
@@ -124,12 +110,11 @@ void writeServoChannel(uint8_t channel, float servoDeg) {
 
 void holdPose() {
   target.mode = 'H';
-  target.baseInput = BASE_HOLD_TRIM_COMMAND;
 }
 
 void goHome() {
   target.mode = 'M';
-  target.baseInput = BASE_HOLD_TRIM_COMMAND;
+  target.baseDeg = BASE_HOME_DEG;
   target.lowerJointDeg = 0.0f;
   target.middleJointDeg = 0.0f;
   target.upperJointDeg = 0.0f;
@@ -165,7 +150,7 @@ bool parsePacket(char* line) {
   }
 
   unsigned long sequence = 0UL;
-  float baseInput = 0.0f;
+  float baseDeg = 0.0f;
   float lowerJoint = 0.0f;
   float middleJoint = 0.0f;
   float upperJoint = 0.0f;
@@ -177,26 +162,24 @@ bool parsePacket(char* line) {
   if (tokens[2][1] != '\0' || (mode != 'A' && mode != 'H' && mode != 'S' && mode != 'M')) {
     return false;
   }
-  if (!parseFloatField(tokens[3], baseInput) || !parseFloatField(tokens[4], lowerJoint) ||
+  if (!parseFloatField(tokens[3], baseDeg) || !parseFloatField(tokens[4], lowerJoint) ||
       !parseFloatField(tokens[5], middleJoint) || !parseFloatField(tokens[6], upperJoint) ||
       !parseFloatField(tokens[7], gripperOpen)) {
     return false;
   }
 
   target.sequence = sequence;
-  target.mode = mode;
-  target.baseInput = clampf(baseInput, -1.0f, 1.0f);
-  target.lowerJointDeg = clampf(lowerJoint, LOWER_JOINT_MIN_DEG, LOWER_JOINT_MAX_DEG);
-  target.middleJointDeg = clampf(middleJoint, MIDDLE_JOINT_MIN_DEG, MIDDLE_JOINT_MAX_DEG);
-  target.upperJointDeg = clampf(upperJoint, UPPER_JOINT_MIN_DEG, UPPER_JOINT_MAX_DEG);
-  target.gripperOpen = clampf(gripperOpen, 0.0f, 1.0f);
-
-  if (mode == 'S') {
-    holdPose();
-  } else if (mode == 'M') {
+  if (mode == 'M') {
     goHome();
-  } else if (mode == 'H') {
-    target.mode = 'H';
+  } else if (mode == 'A') {
+    target.mode = mode;
+    target.baseDeg = clampf(baseDeg, BASE_MIN_DEG, BASE_MAX_DEG);
+    target.lowerJointDeg = clampf(lowerJoint, LOWER_JOINT_MIN_DEG, LOWER_JOINT_MAX_DEG);
+    target.middleJointDeg = clampf(middleJoint, MIDDLE_JOINT_MIN_DEG, MIDDLE_JOINT_MAX_DEG);
+    target.upperJointDeg = clampf(upperJoint, UPPER_JOINT_MIN_DEG, UPPER_JOINT_MAX_DEG);
+    target.gripperOpen = clampf(gripperOpen, 0.0f, 1.0f);
+  } else {
+    target.mode = mode;
   }
   return true;
 }
@@ -235,19 +218,23 @@ void updateOutputs() {
     holdPose();
   }
 
-  float targetBaseInput = clampf(target.baseInput, -1.0f, 1.0f);
+  float targetBaseDeg = clampf(target.baseDeg, BASE_MIN_DEG, BASE_MAX_DEG);
   float lowerServoTarget = lowerJointToServo(target.lowerJointDeg);
   float middleServoTarget = middleJointToServo(target.middleJointDeg);
   float upperServoTarget = upperJointToServo(target.upperJointDeg);
   float gripperServoTarget = gripperOpenToServo(target.gripperOpen);
 
-  currentBaseInput = slewToward(currentBaseInput, targetBaseInput, BASE_SLEW_UNITS_PER_S * dt);
+  currentBaseDeg = slewToward(currentBaseDeg, targetBaseDeg, BASE_SLEW_DEG_PER_S * dt);
   currentLowerServoDeg = slewToward(currentLowerServoDeg, lowerServoTarget, SERVO_SLEW_DEG_PER_S * dt);
   currentMiddleServoDeg = slewToward(currentMiddleServoDeg, middleServoTarget, SERVO_SLEW_DEG_PER_S * dt);
   currentUpperServoDeg = slewToward(currentUpperServoDeg, upperServoTarget, SERVO_SLEW_DEG_PER_S * dt);
   currentGripperServoDeg = slewToward(currentGripperServoDeg, gripperServoTarget, SERVO_SLEW_DEG_PER_S * dt);
 
-  writeServoChannel(BASE_CHANNEL, baseInputToServo(currentBaseInput));
+  float baseServoDeg = baseJointToServo(currentBaseDeg);
+  if (fabsf(baseServoDeg - lastWrittenBaseServoDeg) >= BASE_WRITE_EPSILON_DEG) {
+    writeServoChannel(BASE_CHANNEL, baseServoDeg);
+    lastWrittenBaseServoDeg = baseServoDeg;
+  }
   writeServoChannel(LOWER_CHANNEL, currentLowerServoDeg);
   writeServoChannel(MIDDLE_CHANNEL, currentMiddleServoDeg);
   writeServoChannel(UPPER_CHANNEL, currentUpperServoDeg);
@@ -266,7 +253,8 @@ void setup() {
   lastPacketMs = millis();
   lastUpdateMs = millis();
 
-  writeServoChannel(BASE_CHANNEL, baseInputToServo(BASE_HOLD_TRIM_COMMAND));
+  writeServoChannel(BASE_CHANNEL, baseJointToServo(BASE_HOME_DEG));
+  lastWrittenBaseServoDeg = baseJointToServo(BASE_HOME_DEG);
   writeServoChannel(LOWER_CHANNEL, currentLowerServoDeg);
   writeServoChannel(MIDDLE_CHANNEL, currentMiddleServoDeg);
   writeServoChannel(UPPER_CHANNEL, currentUpperServoDeg);

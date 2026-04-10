@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 @dataclass
 class TeleopCommand:
     mode: str
-    base_command: float
+    base_deg: float
     lower_deg: float
     middle_deg: float
     upper_deg: float
@@ -21,7 +21,7 @@ class TeleopCommand:
     def encode(self) -> bytes:
         line = (
             f"T,{self.sequence},{self.mode},"
-            f"{self.base_command:.4f},{self.lower_deg:.3f},{self.middle_deg:.3f},"
+            f"{self.base_deg:.3f},{self.lower_deg:.3f},{self.middle_deg:.3f},"
             f"{self.upper_deg:.3f},{self.gripper_open:.3f}\n"
         )
         return line.encode("ascii")

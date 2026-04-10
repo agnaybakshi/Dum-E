@@ -23,7 +23,6 @@ class HandObservation:
     depth_metric: float
     pinch_metric: float
     finger_curl_metric: float
-    wrist_tilt_metric: float
 
 
 def _angle_degrees(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
@@ -66,17 +65,6 @@ def _finger_closure(
     base_distance_curl = float(np.clip((0.92 - tip_to_base_ratio) / 0.52, 0.0, 1.0))
     palm_distance_curl = float(np.clip((1.55 - tip_to_palm_ratio) / 0.95, 0.0, 1.0))
     return float(0.5 * joint_curl + 0.3 * base_distance_curl + 0.2 * palm_distance_curl)
-
-
-def _palm_pitch_metric(points: np.ndarray) -> float:
-    index_vec = points[5] - points[0]
-    pinky_vec = points[17] - points[0]
-    palm_normal = np.cross(index_vec, pinky_vec)
-    normal_norm = float(np.linalg.norm(palm_normal))
-    if normal_norm < 1e-6:
-        return 0.0
-    palm_normal /= normal_norm
-    return float(np.arctan2(-palm_normal[1], abs(palm_normal[2]) + 1e-6))
 
 
 class HandTracker:
@@ -148,7 +136,6 @@ class HandTracker:
             finger_curl_metric = float(
                 0.7 * np.mean(finger_closures) + 0.3 * np.min(finger_closures)
             )
-            wrist_tilt_metric = _palm_pitch_metric(landmarks)
 
             pixel_landmarks = np.empty((landmarks.shape[0], 2), dtype=np.int32)
             pixel_landmarks[:, 0] = np.clip(landmarks[:, 0] * frame_w, 0, frame_w - 1).astype(np.int32)
@@ -167,7 +154,6 @@ class HandTracker:
                 depth_metric=depth_metric,
                 pinch_metric=pinch_metric,
                 finger_curl_metric=finger_curl_metric,
-                wrist_tilt_metric=wrist_tilt_metric,
             )
             if best is None or observation.confidence > best.confidence:
                 best = observation

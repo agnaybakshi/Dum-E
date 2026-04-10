@@ -1,13 +1,13 @@
 # Vision Arm Teleoperation v1
 
-This project is a first working teleoperation stack for a small 5-servo tabletop arm driven by a single front-facing webcam, Python, and a PCA9685-based controller board. The laptop-side teleop logic is unchanged, and the transport can now be either Arduino serial or ESP32 Wi-Fi UDP.
+This project is a first working teleoperation stack for a small 5-servo tabletop arm driven by a single front-facing webcam, Python, and a PCA9685-based controller board. The laptop-side teleop logic now treats the base as a bounded positional yaw joint, and the transport can be either Arduino serial or ESP32 Wi-Fi UDP.
 
 ## Architecture summary
 
 - `main.py` runs the control loop, keyboard safety controls, target generation, and transport output.
 - `vision.py` tracks one hand with MediaPipe Hands and extracts stable hand features.
 - `hand_mapping.py` converts hand motion into teleop controls:
-  - horizontal hand offset -> base yaw rate command
+  - horizontal hand offset -> joystick-style bounded base yaw motion
   - vertical hand position -> upper-arm pitch target
   - relative hand size/depth proxy -> lower-arm pitch target
   - upper/lower average -> middle-arm pitch target
@@ -23,7 +23,8 @@ This project is a first working teleoperation stack for a small 5-servo tabletop
 
 ## Important design limits
 
-- The base servo is continuous rotation, so v1 uses open-loop base rate control only. Absolute base angle is not known.
+- The base is now treated as a bounded positional yaw joint with about `180` degrees of travel.
+- The firmware still receives a bounded target yaw angle, but the host now drives that angle with joystick-style left/right rate control so the hand can return to center to stop.
 - The single RGB camera provides only a relative depth proxy. Reach control is therefore relative and must be tuned experimentally.
 - The current teleop version uses direct joint mapping for the three pitch joints:
   - lower joint from relative depth
@@ -88,11 +89,8 @@ PCA9685 wiring and channel map for Arduino Uno:
 - `x`: toggle emergency stop
 - `h`: send home/hold request
 - `n`: capture current hand as neutral position and depth reference
-- `o`: capture current hand as the open-grip reference
-- `p`: capture current hand as the closed-grip reference
-- `r`: reload `config/calibration.json`
-- `[`: nudge base neutral trim negative
-- `]`: nudge base neutral trim positive
+- `[`: slow the base yaw rate down
+- `]`: speed the base yaw rate up
 
 ## ESP32 UDP migration
 
@@ -101,7 +99,7 @@ What changed:
 - The laptop still generates the same teleop command semantics and the same packet format:
 
 ```text
-T,seq,mode,base_cmd,lower_deg,middle_deg,upper_deg,gripper_open
+T,seq,mode,base_deg,lower_deg,middle_deg,upper_deg,gripper_open
 ```
 
 - `main.py` now selects either serial or UDP transport from config.
@@ -145,7 +143,7 @@ The ESP32 will request the fixed IP from `wifi_secrets.h` and print that IP plus
 Test the ESP32 without MediaPipe:
 
 ```bash
-python send.py --host 192.168.137.50 --port 4210 --mode A --base 0.0 --lower 10 --middle 20 --upper 30 --gripper 0.5 --rate 20 --count 0
+python send.py --host 192.168.137.50 --port 4210 --mode A --base 90 --lower 10 --middle 20 --upper 30 --gripper 0.5 --rate 20 --count 0
 ```
 
 Switch transports in `config/calibration.json`:
@@ -165,9 +163,9 @@ Switch transports in `config/calibration.json`:
 What remains unchanged:
 
 - camera / MediaPipe hand tracking
-- filtering and mapping logic
+- pitch-joint filtering and mapping logic
 - teleop modes `A`, `H`, `S`, `M`
-- joint-angle and gripper-open command semantics
+- joint-angle and gripper-open command semantics for lower/middle/upper/gripper
 - calibration JSON as the master source
 
 ## Calibration workflow
@@ -179,19 +177,18 @@ Use the JSON as the master calibration file, then regenerate the firmware header
 1. Start with `python main.py --no-serial`.
 2. Stand in front of the camera with your operating hand in the intended neutral position.
 3. Press `n` to store `neutral_x`, `neutral_y`, and `depth_reference`.
-4. Open your hand fully and press `o`.
-5. Close/curl your fingers and press `p`.
-6. Adjust the teleop region in `config/calibration.json` if you want a larger or smaller active box.
-7. Tune `mapping.yaw_deadband` and the firmware joint signs until motion feels natural.
+4. If needed, set grip references from the command line with `python calibration.py set-grip --open ... --closed ...`.
+5. Tune `mapping.yaw_deadband`, `mapping.yaw_exponent`, `mapping.yaw_max_rate_deg_s`, `filters.yaw_rate_alpha`, and `filters.yaw_stop_rate_deg_s` until yaw feels natural.
 
 ### Servo and base calibration
 
 1. Power the arm safely with the links unloaded or mechanically free to move.
 2. Keep `freeze_on_start` set to `true` until calibration is complete.
 3. Edit the firmware section in `config/calibration.json`:
-   - `base_stop_deg`
-   - `base_speed_range_deg`
-   - `base_direction_sign`
+   - `base_center_deg`
+   - `base_home_deg`
+   - `base_min_deg`
+   - `base_max_deg`
    - `lower_zero_deg`, `middle_zero_deg`, `upper_zero_deg`
    - `lower_sign`, `middle_sign`, `upper_sign`
    - `gripper_open_servo_deg`, `gripper_closed_servo_deg`
@@ -203,48 +200,48 @@ python calibration.py export-firmware
 
 5. Rebuild and reflash the target firmware after header changes.
 
-### Base drift fix
+### Base yaw calibration
 
-If the base drifts with no hand input:
+For the direct-drive positional base:
 
-1. Start the app with teleop still frozen.
-2. Check the overlay. `Status` should be `startup hold` or `frozen`, and `Base cmd` should match your current neutral trim.
-3. If the base still creeps, tune the continuous-servo neutral stop:
+1. Verify that `base_min_deg` and `base_max_deg` match the safe mechanical travel of the new yaw joint.
+2. Set `base_center_deg` so a centered hand points the arm straight ahead.
+3. Set `base_home_deg` to the startup/home angle you want the arm to return to.
+4. Use the `[` and `]` keys to change `mapping.yaw_max_rate_deg_s` live while the app is running.
+5. If you need to change the physical center angle, edit `base_center_deg` or use `python calibration.py set-base-center --deg ...`.
+6. After you settle on the new center or limits, run:
 
 ```bash
-python calibration.py set-base-stop --deg 91
 python calibration.py export-firmware
 ```
 
-4. Rebuild and reflash the target firmware and test again.
-5. Try nearby values such as `89`, `90`, `91`, or `92` until the base truly stops at zero command.
-
-`base_trim_command` is currently used as the neutral stop trim for the continuous-rotation base, including hold modes.
+7. Rebuild and reflash the target firmware so startup, watchdog hold, and home use the same base constants.
 
 ## Teleop protocol
 
 Python sends newline-terminated packets:
 
 ```text
-T,seq,mode,base_cmd,lower_deg,middle_deg,upper_deg,gripper_open
+T,seq,mode,base_deg,lower_deg,middle_deg,upper_deg,gripper_open
 ```
 
 - `mode`:
   - `A` active teleop
-  - `H` hold last pose and stop base
-  - `S` stop base and hold pose
+  - `H` hold the last pose, including the current base angle
+  - `S` emergency stop hold at the current pose
   - `M` go to configured home pose
-- `base_cmd`: normalized continuous-rotation command in `[-1, 1]`
+- `base_deg`: bounded base yaw target angle in degrees
 - `lower_deg`, `middle_deg`, `upper_deg`: pitch joint output angles in degrees
 - `gripper_open`: normalized gripper openness in `[0, 1]`
 
 ## Safety notes
 
-- The arm does not move unless the hand is confidently detected inside the active box and teleop is unfrozen.
-- Tracking loss stops the base and holds the last pitch pose.
-- The firmware watchdog stops the base if packets stop arriving.
+- The arm does not move unless the hand is confidently tracked and teleop is unfrozen.
+- Tracking loss holds the last commanded base angle and pitch pose.
+- The firmware watchdog holds the last commanded base angle if packets stop arriving.
+- Startup can perform a short hello wave on the upper pitch joint after homing.
 - Both Python and the active firmware target clamp commands before motion.
-- Start with small workspace limits and conservative base speed until the mechanism is tuned.
+- Start with conservative base travel limits until the new yaw mechanism is tuned.
 - The PCA9685 servo rail still needs external servo power and a common ground with the Arduino.
 
 ## Future upgrades
