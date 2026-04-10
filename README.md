@@ -255,20 +255,5 @@ T,seq,mode,base_cmd,lower_deg,middle_deg,upper_deg,gripper_open
 - The firmware watchdog stops the base if packets stop arriving.
 - Both Python and the active firmware target clamp commands before motion.
 - Start with small workspace limits and conservative base speed until the mechanism is tuned.
-- The PCA9685 servo rail still needs external servo power and a common ground with the Arduino.
+- The PCA9685 servo rail still needs external servo power and a common ground with the ESP 32.
 
-## Future upgrades
-
-- Add base encoder feedback and upgrade to full 3D Cartesian IK.
-- Add table calibration and workspace visualization in robot coordinates.
-- Add logging and replay for tuning hand mappings.
-- Add an overhead camera or multi-camera fusion for better depth and pick/place precision.
-- Add optional assisted grasp modes after manual teleop is stable.
-
-
-
-If you accidentally staged `wifi_secrets.h`, remove it before committing:
-
-```bash
-git rm --cached arduino/esp32/vision_arm_esp/include/wifi_secrets.h
-```
